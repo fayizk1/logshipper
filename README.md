@@ -1,9 +1,10 @@
 # logshipper
 
-#build
+# build
+
 cargo build --release
 
-#test
+# test
 
 
 
