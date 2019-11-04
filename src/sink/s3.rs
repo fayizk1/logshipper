@@ -25,8 +25,8 @@ impl S3Sink {
         };
 
         let p = StaticProvider::new_minimal(
-            "85PEZKGQ200HQVLZMRS9".into(),
-            "Srl5W4hwjLiK+lbxT7XDe1ic0+Zk1LlR3fyJPnib".into(),
+            "4GPPRHVT0AN4J16KF5I0".into(),
+            "N2Nmnk7cIj3rh0M3hDDxIHKl10nZppiopHXjEOya".into(),
         );
         let d = HttpClient::new().unwrap();
         let client = S3Client::new_with(d, p, region);

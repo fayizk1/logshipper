@@ -3,11 +3,12 @@ mod sink;
 mod tools;
 use sink::s3::S3Sink;
 use std::collections::{BTreeMap, HashMap};
-use std::io::Read;
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::SocketAddr;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::thread;
-
+use tokio::io::{AsyncRead, Error};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::prelude::*;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde;
@@ -19,13 +20,21 @@ pub struct Greeting {
     content: HashMap<String, String>,
 }
 
-fn handle_client(mut stream: TcpStream, tx: SyncSender<Greeting>) {
-    let mut data = [0 as u8; 1250]; // using 50 byte buffer
-    'outer: while match stream.read(&mut data) {
-        Ok(size) => {
-            // echo everything!
-            // stream.write(&data[0..size]).unwrap();
-            let s = match std::str::from_utf8(&data[0..size]) {
+struct Receiver {
+    rx: TcpStream,
+    tx: SyncSender<Greeting>,
+}
+impl Future for Receiver {
+    type Item = ();
+    type Error = Error;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        let mut buffer = vec![0u8; 1250];
+        'outer: while let Async::Ready(num_bytes_read) = self.rx.poll_read(&mut buffer)? {
+            if num_bytes_read == 0 {
+                return Ok(Async::Ready(()));
+            } //socket closed
+            let s = match std::str::from_utf8(&buffer[0..num_bytes_read]) {
                 Ok(v) => v,
                 Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
             };
@@ -33,28 +42,21 @@ fn handle_client(mut stream: TcpStream, tx: SyncSender<Greeting>) {
                 Ok(v) => v,
                 Err(e) => {
                     if e.is_eof() {
-                        return;
+                        return Ok(Async::Ready(()));
                     }
                     println!("Parse error {}", e);
                     continue 'outer;
                 }
             };
-            tx.send(de_serialized).unwrap();
-            true
+            self.tx.send(de_serialized).unwrap();
         }
-        Err(_) => {
-            println!(
-                "An error occurred, terminating connection with {}",
-                stream.peer_addr().unwrap()
-            );
-            stream.shutdown(Shutdown::Both).unwrap();
-            false
-        }
-    } {}
+        return Ok(Async::NotReady);
+    }
 }
 
 fn main() {
-    let listener = TcpListener::bind("0.0.0.0:3333").unwrap();
+    let addr = "0.0.0.0:3333".to_string().parse::<SocketAddr>().unwrap();
+    let listener = TcpListener::bind(&addr).unwrap();
     // accept connections and process them, spawning a new thread for each one
     let (tx, rx) = sync_channel::<Greeting>(2);
     let s3 = S3Sink::new();
@@ -69,21 +71,16 @@ fn main() {
             .unwrap();
         }
     });
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let stream_tx = tx.clone();
-                thread::spawn(move || {
-                    // connection succeeded
-                    handle_client(stream, stream_tx)
-                });
-            }
-            Err(e) => {
-                println!("Error: {}", e);
-                /* connection failed */
-            }
-        }
-    }
-    // close the socket server
-    drop(listener);
+    let server = listener
+        .incoming()
+        .map_err(|e| println!("failed to accept socket; error = {:?}", e))
+        .for_each(move |stream| {
+            let stream_tx = tx.clone();
+            let receiver = Receiver {
+                rx: stream,
+                tx: stream_tx,
+            };
+            tokio::spawn(receiver.map_err(|e| println!("{}", e)))
+        });
+    tokio::run(server);
 }
